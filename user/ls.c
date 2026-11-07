@@ -4,6 +4,17 @@
 #include "kernel/fs.h"
 #include "kernel/fcntl.h"
 
+static int lstat(const char* n, struct stat* st)
+{
+  int fd,r;
+  if((fd = open(n,O_RDONLY|O_NOFOLLOW))<0)
+  return -1;
+
+  r = fstat(fd,st);
+  close(fd);
+  return r;
+}
+
 char *
 fmtname(char *path)
 {
@@ -32,7 +43,8 @@ ls(char *path)
   struct dirent de;
   struct stat st;
 
-  if ((fd = open(path, O_RDONLY)) < 0) {
+  // if ((fd = open(path, O_RDONLY)) < 0) {
+  if ((fd = open(path, O_RDONLY|O_NOFOLLOW)) < 0) {
     fprintf(2, "ls: cannot open %s\n", path);
     return;
   }
@@ -62,12 +74,16 @@ ls(char *path)
         continue;
       memmove(p, de.name, DIRSIZ);
       p[DIRSIZ] = 0;
-      if (stat(buf, &st) < 0) {
+      // if (stat(buf, &st) < 0) {
+      if (lstat(buf, &st) < 0) {
         printf("ls: cannot stat %s\n", buf);
         continue;
       }
       printf("%s %d %d %d\n", fmtname(buf), st.type, st.ino, (int)st.size);
     }
+    break;
+  case T_SYMLINK:
+    printf("%s %d %d %d\n", fmtname(path), st.type, st.ino, (int)st.size);
     break;
   }
   close(fd);
