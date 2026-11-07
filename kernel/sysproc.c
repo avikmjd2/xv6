@@ -110,3 +110,56 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+// TODO(mini-project 2): register an alarm handler to be invoked every
+// `ticks` ticks of CPU time consumed by this process. sigalarm(0, 0)
+// cancels a pending alarm. Return 0 on success, non-zero on failure.
+uint64
+sys_sigalarm(void)
+{
+  int ticks;
+  uint64 handler;
+
+  argint(0,&ticks);
+  argaddr(1,&handler);
+
+  if(ticks<0) return -1;
+
+  struct proc* p = myproc();
+
+  // a live alarm needs a handler inside the process, on an executable user
+  // page (address 0 is valid: user text starts there)
+  if(ticks>0)
+  {
+    pte_t *pte;
+    if(handler >= p->sz || (pte = walk(p->pagetable, handler, 0)) == 0 ||
+       (*pte & (PTE_V|PTE_U|PTE_X)) != (PTE_V|PTE_U|PTE_X))
+      return -1;
+  }
+  p->alarm_interval = ticks;
+  p->alarm_handler=handler;
+  p->alarm_ticks_elapsed=0;
+
+  if(ticks==0)
+  {
+    p->alarm_handler_running = 0;
+  }
+
+  return 0;
+}
+
+// TODO(mini-project 2): restore the process state saved when the alarm
+// handler was invoked, so that the interrupted user code resumes as if
+// nothing had happened.
+uint64
+sys_sigreturn(void)
+{
+  struct proc* p = myproc();
+  if(!p->alarm_handler_running)
+    return -1;   // sigreturn without a running handler: nothing to restore
+  *p->trapframe = p->alarm_saved_tf;
+  //mark the alarm hanlder as finished so future alarms can fire
+  p->alarm_handler_running = 0;
+
+  return p->trapframe->a0;
+}

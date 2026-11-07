@@ -134,6 +134,12 @@ kexec(char *path, char **argv)
   p->pagetable = pagetable;
   p->sz = sz;
   p->trapframe->epc = elf.entry; // initial program counter = ulib.c:start()
+
+  // the old image's alarm handler address means nothing in the new image
+  p->alarm_interval = 0;
+  p->alarm_handler = 0;
+  p->alarm_ticks_elapsed = 0;
+  p->alarm_handler_running = 0;
   p->trapframe->sp = sp;         // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
 
