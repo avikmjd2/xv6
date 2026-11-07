@@ -167,7 +167,7 @@ UPROGS=\
 	$U/_schedtest\
 	$U/_schedmixed\
 	$U/_symlinktest\
-	$U/_readlink
+	$U/_readlink\
 	$U/_cowtest\
 	$U/_alarmtest\
 
