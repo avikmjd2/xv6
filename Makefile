@@ -87,6 +87,9 @@ endif
 ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]nopie'),)
 CFLAGS += -fno-pie -nopie
 endif
+ifdef SCHEDULER
+CFLAGS += -D$(SCHEDULER)
+endif
 
 LDFLAGS = -z max-page-size=4096
 
@@ -120,6 +123,17 @@ $U/_forktest: $U/forktest.o $(ULIB)
 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $U/_forktest $U/forktest.o $U/ulib.o $U/usys.o
 	$(OBJDUMP) -S $U/_forktest > $U/forktest.asm
 
+$U/_schedtest: tests/schedtest.o $(ULIB)
+	$(LD) $(LDFLAGS) -T $U/user.ld -o $@ tests/schedtest.o $(ULIB)
+	$(OBJDUMP) -S $@ > tests/schedtest.asm
+	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > tests/schedtest.sym
+$U/_schedmixed: tests/schedmixed.o $(ULIB)
+	$(LD) $(LDFLAGS) -T $U/user.ld -o $@ tests/schedmixed.o $(ULIB)
+	$(OBJDUMP) -S $@ > tests/schedmix.asm
+	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > tests/schedmix.sym
+tests/%.o: tests/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 mkfs/mkfs: mkfs/mkfs.c $K/fs.h $K/param.h
 	gcc -Wno-unknown-attributes -I. -o mkfs/mkfs mkfs/mkfs.c
 
@@ -150,20 +164,23 @@ UPROGS=\
 	$U/_forphan\
 	$U/_dorphan\
 	$U/_sync\
+	$U/_schedtest\
+	$U/_schedmixed\
 	$U/_symlinktest\
 	$U/_readlink
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
 
--include kernel/*.d user/*.d
+-include kernel/*.d user/*.d tests/*.d
 
 clean: 
 	rm -f *.tex *.dvi *.idx *.aux *.log *.ind *.ilg \
 	*/*.o */*.d */*.asm */*.sym \
+	tests/*.o tests/*.d tests/*.asm tests/*.sym \
 	$K/kernel fs.img \
 	mkfs/mkfs .gdbinit \
-        $U/usys.S \
+	$U/usys.S \
 	$(UPROGS)
 
 # try to generate a unique GDB port

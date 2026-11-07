@@ -43,4 +43,5 @@ entry("sbrk");
 entry("pause");
 entry("uptime");
 entry("sync");
+entry("waitx");
 entry("symlink");

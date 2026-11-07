@@ -37,6 +37,17 @@ sys_wait(void)
 }
 
 uint64
+sys_waitx(void)
+{
+  uint64 addr, wtime, rtime, resp;
+  argaddr(0, &addr); //Manually read the users argument 0,1,2,3 (params) from users trapframe. Now the control has been taken by the kernel.
+  argaddr(1, &wtime);
+  argaddr(2, &rtime);
+  argaddr(3, &resp);
+  return waitx(addr, wtime, rtime, resp);
+}
+
+uint64
 sys_sbrk(void)
 {
   uint64 addr;

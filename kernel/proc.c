@@ -6,6 +6,12 @@
 #include "proc.h"
 #include "defs.h"
 
+uint64 my_clock = 0;
+uint64 get_next_clock()
+{
+  return __sync_add_and_fetch(&my_clock,1);
+}
+
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
@@ -14,6 +20,7 @@ struct proc *initproc;
 
 int nextpid = 1;
 struct spinlock pid_lock;
+struct spinlock mlfq_lock;
 
 extern void forkret(void);
 static void freeproc(struct proc *p);
@@ -56,6 +63,8 @@ procinit(void)
     p->state = UNUSED;
     p->kstack = KSTACK((int)(p - proc));
   }
+
+  initlock(&mlfq_lock,"mlfq_lock");
 }
 
 // Must be called with interrupts disabled,
@@ -145,6 +154,14 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+  p->queue=0;
+  p->current_ticks=0;
+  // p->enter_tick = ++my_clock;
+  p->enter_tick = get_next_clock();
+  p->ctime = ticks;
+  p->stime = 0;
+  p->etime = 0;
+  p->rtime = 0;
 
   return p;
 }
@@ -168,6 +185,9 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->queue = 3;
+  p->current_ticks=0;
+  p->enter_tick=0;
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -356,6 +376,7 @@ kexit(int status)
 
   p->xstate = status;
   p->state = ZOMBIE;
+  p->etime = ticks;
 
   release(&wait_lock);
 
@@ -418,6 +439,76 @@ kwait(uint64 addr)
   }
 }
 
+
+int waitx(uint64 addr, uint64 wtime_addr, uint64 rtime_addr, uint64 resp_addr)
+{
+  struct proc* pp;
+  struct proc* p = myproc();
+  int havekids, pid;
+
+  acquire(&wait_lock);
+  for(;;)
+  {
+    havekids = 0;
+    for(pp = proc; pp < &proc[NPROC]; pp++)
+    {
+      if(pp->parent == p)
+      {
+        acquire(&pp->lock);
+        havekids = 1;
+        if(pp->state == ZOMBIE)
+        {
+          pid = pp->pid;
+          uint rtime = pp->rtime;
+          uint ttime = pp->etime - pp->ctime;
+          uint wtime = (ttime > rtime) ? (ttime - rtime) : 0;
+          uint resp = (pp->stime > pp->ctime) ? (pp->stime - pp->ctime) : 0;
+
+          if(addr != 0 && copyout(p->pagetable, p->sz, addr, (char *)&pp->xstate, sizeof(pp->xstate)) < 0)
+          {
+            release(&pp->lock);
+            release(&wait_lock);
+            return -1;
+          }
+          if(wtime_addr != 0 && copyout(p->pagetable, p->sz, wtime_addr, (char *)&wtime, sizeof(wtime)) < 0) {
+            release(&pp->lock);
+            release(&wait_lock);
+            return -1;
+          }
+          if(rtime_addr != 0 && copyout(p->pagetable, p->sz, rtime_addr, (char *)&rtime, sizeof(rtime)) < 0) {
+            release(&pp->lock);
+            release(&wait_lock);
+            return -1;
+          }
+          if(resp_addr != 0 && copyout(p->pagetable, p->sz, resp_addr, (char *)&resp, sizeof(resp)) < 0) {
+            release(&pp->lock);
+            release(&wait_lock);
+            return -1;
+          }
+          pp->parent = 0;
+          freeproc(pp);
+          release(&pp->lock);
+          release(&wait_lock);
+          return pid;
+        }
+        release(&pp->lock);
+      }
+    }
+
+    if(!havekids || killed(p))
+    {
+      release(&wait_lock);
+      return -1;
+    }
+
+    sleep_prepare(p);
+    release(&wait_lock);
+    sleep();
+    acquire(&wait_lock);
+  }
+}
+
+
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
 // Scheduler never returns.  It loops, doing:
@@ -432,6 +523,105 @@ scheduler(void)
   struct cpu *c = mycpu();
 
   c->proc = 0;
+
+  #ifdef MLFQ
+  for(;;)
+  {
+    intr_on();
+    intr_off();
+
+    acquire(&mlfq_lock);
+    struct proc* best = 0;
+    int best_q = 3;
+    for (p=proc; p < &proc[NPROC]; p++) 
+    {
+      acquire(&p->lock);
+      if(p->state != RUNNABLE || p->queue > best_q) 
+      {
+        release(&p->lock);
+        continue;
+      }
+      
+      if(best == 0)
+      {
+        best = p;
+        best_q = p->queue;
+        continue;
+      }
+
+      if(p->queue < best_q || (best_q == p-> queue && best->enter_tick > p->enter_tick))
+      {
+        release(&best->lock);
+        best = p;
+        best_q = p->queue;
+        continue;
+      }
+      release(&p->lock);
+    }
+
+    if(best!=0)
+    {
+      best->state = RUNNING;
+      release(&mlfq_lock);
+      c->proc = best;
+      if (best->stime == 0)
+      best->stime = ticks;
+      swtch(&c->context, &best->context);
+      mycpu()->intena = 0;
+      c->proc = 0;
+      release(&best->lock);
+    }
+    else 
+    {
+      release(&mlfq_lock);
+      intr_on();
+      asm volatile("wfi");
+    }
+
+  }
+  #elif defined(FIFO)
+  for(;;)
+  {
+    intr_on();
+    intr_off();
+    struct proc* earliest = 0;
+    for (p=proc; p < &proc[NPROC]; p++) 
+    {
+      acquire(&p->lock);
+      if(p->state == RUNNABLE)
+      {
+        if(earliest==0 || p->ctime < earliest->ctime)
+        {
+          if(earliest!=0)
+          release(&earliest->lock);
+          earliest = p;
+          continue;
+        }
+      }
+      
+      release(&p->lock);
+    }
+
+    if(earliest!=0)
+    {
+      earliest->state = RUNNING;
+      c->proc = earliest;
+      if (earliest->stime == 0)
+      earliest->stime = ticks;
+      swtch(&c->context, &earliest->context);
+      mycpu()->intena = 0;
+      c->proc = 0;
+      release(&earliest->lock);
+    }
+    else 
+    {
+      intr_on();
+      asm volatile("wfi");
+    }
+
+  }
+  
+  #else
   for (;;) {
     // The most recent process to run may have had interrupts
     // turned off; enable them to avoid a deadlock if all
@@ -449,6 +639,8 @@ scheduler(void)
         // to release its lock and then reacquire it
         // before jumping back to us.
         p->state = RUNNING;
+        if (p->stime == 0)
+        p->stime = ticks;
         c->proc = p;
         swtch(&c->context, &p->context);
 
@@ -467,6 +659,8 @@ scheduler(void)
       asm volatile("wfi");
     }
   }
+
+  #endif
 }
 
 // Switch to scheduler.  Must hold only p->lock
@@ -519,13 +713,14 @@ forkret(void)
   // Still holding p->lock from scheduler.
   release(&p->lock);
 
-  if (first) {
-    first = 0;
-
+  if (__atomic_load_n(&first, __ATOMIC_ACQUIRE)) {
     // File system initialization must be run in the context of a
     // regular process (e.g., because it calls sleep), and thus cannot
     // be run from main().
     fsinit(ROOTDEV);
+
+    // ensure other cores see first=0.
+    __atomic_store_n(&first, 0, __ATOMIC_RELEASE);
 
     // We can invoke kexec() now that file system is initialized.
     // Put the return value (argc) of kexec into a0.
@@ -588,6 +783,11 @@ wakeup(void *chan)
       // go to sleep, also set it back to RUNNING.
       if (p->state == SLEEPING) {
         p->state = RUNNABLE;
+        #ifdef MLFQ
+        p->current_ticks = 0;
+        // p->enter_tick = ++my_clock;
+        p->enter_tick = get_next_clock();
+        #endif
       }
     }
     release(&p->lock);
@@ -609,6 +809,10 @@ kkill(int pid)
       if (p->state == SLEEPING) {
         // Wake process from sleep().
         p->state = RUNNABLE;
+        #ifdef MLFQ
+        p->current_ticks = 0;
+        p->enter_tick = get_next_clock();
+        #endif
       }
       release(&p->lock);
       return 0;
@@ -687,6 +891,11 @@ procdump(void)
   char *state;
 
   printk("\n");
+  #ifdef MLFQ
+    printk("--- MLFQ PROCDUMP (Ticks since last boost: %d/48) ---\n", ticks % 48);
+    printk("PID\tSTATE\tNAME\tQUEUE\tTICKS\tENTER_TICK\n");
+  #endif
+
   for (p = proc; p < &proc[NPROC]; p++) {
     if (p->state == UNUSED)
       continue;
@@ -694,7 +903,51 @@ procdump(void)
       state = states[p->state];
     else
       state = "???";
+
+    #ifdef MLFQ
+    printk("%d\t%s\t%s\t%d\t%d\t%lu",p->pid, state, p->name, p->queue, p->current_ticks, p->enter_tick);
+    #else
     printk("%d %s %s", p->pid, state, p->name);
+    #endif
     printk("\n");
   }
 }
+
+
+#ifdef MLFQ
+int more_priority(int curr)
+{
+  if(curr==0) return 0;
+  struct proc *p;
+  for(p=proc;p<&proc[NPROC];p++)
+  {
+    if(p==myproc()) continue;
+    acquire(&p->lock);
+
+    if(p->queue < curr && p->state == RUNNABLE)
+    {
+      release(&p->lock);
+      return 1;
+    }
+    release(&p->lock);
+  }
+  return 0;
+}
+
+void mlfq_boost()
+{
+  struct proc* p;
+  for(p=proc;p<&proc[NPROC];p++)
+  {
+    acquire(&p->lock);
+    if(p->state != UNUSED)
+    {
+        p->queue=0;
+        p->current_ticks=0;
+        // p->enter_tick=++my_clock;
+        p->enter_tick= get_next_clock();
+    }
+    release(&p->lock);
+  }
+}
+#endif
