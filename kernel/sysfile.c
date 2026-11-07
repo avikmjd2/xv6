@@ -280,7 +280,7 @@ create(char *path, short type, short major, short minor)
   if ((ip = dirlookup(dp, name, 0)) != 0) {
     iunlockput(dp);
     ilock(ip);
-    if (type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE))
+    if (type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE || ip->type == T_SYMLINK))
       return ip;
     iunlockput(ip);
     return 0;
@@ -333,6 +333,8 @@ sys_open(void)
   struct file *f;
   struct inode *ip;
   int n;
+  int dept = 0;
+  uint sz;
 
   argint(1, &omode);
   if ((n = argstr(0, path, MAXPATH)) < 0)
@@ -340,23 +342,57 @@ sys_open(void)
 
   begin_op();
 
-  if (omode & O_CREATE) {
-    ip = create(path, T_FILE, 0, 0);
-    if (ip == 0) {
-      end_op();
-      return -1;
+  for(;;)
+  {
+    if (omode & O_CREATE) {
+      ip = create(path, T_FILE, 0, 0);
+      if (ip == 0) {
+        end_op();
+        return -1;
+      }
+    } 
+    else 
+    {
+      if ((ip = namei(path)) == 0) {
+        end_op();
+        return -1;
+      }
+      ilock(ip);
+      // if (ip->type == T_DIR && omode != O_RDONLY) {
+      //   iunlockput(ip);
+      //   end_op();
+      //   return -1;
+      // }
     }
-  } else {
-    if ((ip = namei(path)) == 0) {
-      end_op();
-      return -1;
-    }
-    ilock(ip);
-    if (ip->type == T_DIR && omode != O_RDONLY) {
+
+    if(ip->type!=T_SYMLINK || (omode & O_NOFOLLOW))
+    break;
+  
+    //follow the link atmost 10 hops
+    sz = ip->size;
+    if(++dept > 10 || sz==0||sz>=MAXPATH||readi(ip,0,(uint64)path,0,sz)!=(int)sz)
+    {
       iunlockput(ip);
       end_op();
       return -1;
     }
+    path[sz] = 0;  // target is stored without a NUL
+    iunlockput(ip); // never hold the link's lock while resolving the next path
+  }
+
+  if (ip->type == T_DIR && (omode & ~O_NOFOLLOW) != O_RDONLY) 
+  {
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  //never hand out a writable fd to a symlicks own data
+  if(ip->type == T_SYMLINK && (omode &(O_WRONLY | O_RDWR)))
+  {
+    iunlockput(ip);
+    end_op();
+    return -1;
   }
 
   if (ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)) {
@@ -378,7 +414,7 @@ sys_open(void)
     f->major = ip->major;
   } else {
     f->type = FD_INODE;
-    f->off = 0;
+    f->off = (omode & O_APPEND) ? ip->size : 0;
   }
   f->ip = ip;
   f->readable = !(omode & O_WRONLY);
@@ -527,4 +563,67 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+
+uint64 sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+  char name[DIRSIZ];
+  struct inode *ip, *dp;
+  int n;
+  if((n = argstr(0, target, MAXPATH)) <= 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  //start a filesystem transaction
+  begin_op();
+
+  if ((dp = nameiparent(path, name)) == 0) 
+  {
+    end_op();
+    return -1;
+  }
+
+  // dp stays locked from here until after dirlink, so the existence
+  ilock(dp);
+  if ((ip = dirlookup(dp, name, 0)) != 0) // path already exists
+  { 
+    iput(ip);          // dirlookup returns it referenced but unlocked
+    iunlockput(dp);
+    end_op();
+    return -1;
+  }
+
+  if ((ip = ialloc(dp->dev, T_SYMLINK)) == 0) 
+  {
+
+    iunlockput(dp);
+    end_op();
+    return -1;
+  }
+
+  ilock(ip);
+  ip->nlink = 1;
+
+  //write the target string in the block
+  if(writei(ip,0,(uint64)target,0,n)!=n)
+  goto fail;
+
+  if (dirlink(dp, name, ip->inum) < 0)
+    goto fail;
+  
+  iupdate(ip);
+  //Unlock and release reference, then commit transaction
+  iunlockput(ip);
+  iunlockput(dp);
+  end_op();
+  return 0;
+  
+  fail: // Name was never linked into dp, so just free the new inode.
+    ip->nlink = 0;
+    iupdate(ip);
+    iunlockput(ip);
+    iunlockput(dp);
+    end_op();
+    return -1;
+
 }
