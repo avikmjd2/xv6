@@ -9,6 +9,35 @@
 #include "riscv.h"
 #include "defs.h"
 
+#define NPHYSPAGES ((PHYSTOP-KERNBASE)/PGSIZE)
+
+struct 
+{
+  struct spinlock lock;
+  int cnt[NPHYSPAGES];
+} refcount;
+
+static inline int
+pa2ind(uint64 pa)
+{
+  return(pa-KERNBASE)/PGSIZE;
+}
+
+void krefincr(void *pa)
+{
+  acquire(&refcount.lock);
+  refcount.cnt[pa2ind((uint64)pa)]++;
+  release(&refcount.lock);
+}
+
+int krefget(void*pa)
+{
+  acquire(&refcount.lock);
+  int c = refcount.cnt[pa2ind((uint64)pa)];
+  release(&refcount.lock);
+  return c;
+}
+
 void freerange(void *pa_start, void *pa_end);
 
 extern char end[]; // first address after kernel.
@@ -27,6 +56,7 @@ void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  initlock(&refcount.lock,"refcount");
   freerange(end, (void *)PHYSTOP);
 }
 
@@ -36,7 +66,10 @@ freerange(void *pa_start, void *pa_end)
   char *p;
   p = (char *)PGROUNDUP((uint64)pa_start);
   for (; p + PGSIZE <= (char *)pa_end; p += PGSIZE)
+  {
+    refcount.cnt[pa2ind((uint64)p)]=1;
     kfree(p);
+  }
 }
 
 // Free the page of physical memory pointed at by pa,
@@ -50,6 +83,23 @@ kfree(void *pa)
 
   if (((uint64)pa % PGSIZE) != 0 || (char *)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
+
+  acquire(&refcount.lock);
+  int ind = pa2ind((uint64)pa);
+
+  if(refcount.cnt[ind] <=0)
+  {
+    panic("kfree: refcount underflow");
+  }
+
+  refcount.cnt[ind]--;
+  if(refcount.cnt[ind]>0)
+  {
+    release(&refcount.lock);
+    return;
+  }
+
+  release(&refcount.lock);
 
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
@@ -77,6 +127,12 @@ kalloc(void)
   release(&kmem.lock);
 
   if (r)
+  {
     memset((char *)r, 5, PGSIZE); // fill with junk
+    acquire(&refcount.lock);
+    refcount.cnt[pa2ind((uint64)r)]=1;
+    release(&refcount.lock);
+
+  }
   return (void *)r;
 }

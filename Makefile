@@ -168,6 +168,8 @@ UPROGS=\
 	$U/_schedmixed\
 	$U/_symlinktest\
 	$U/_readlink
+	$U/_cowtest\
+	$U/_alarmtest\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

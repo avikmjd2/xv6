@@ -301,7 +301,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for (i = 0; i < sz; i += PGSIZE) {
     if ((pte = walk(old, i, 0)) == 0)
@@ -310,13 +309,20 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       continue; // physical page hasn't been allocated
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if ((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char *)pa, PGSIZE);
-    if (mappages(new, i, PGSIZE, (uint64)mem, flags) != 0) {
-      kfree(mem);
+    
+    //if the page is writable make it read only (cow) and then refer it to both the parent and the child
+    if(flags & PTE_W)
+    {
+      flags = (flags & ~PTE_W) | PTE_COW;
+      *pte = PA2PTE(pa) | flags; //update parents
+    }
+
+    if(mappages(new,i,PGSIZE,pa,flags)!=0) //map the VA of child to parents with same flag
+    {
       goto err;
     }
+
+    krefincr((void*)pa);
   }
   return 0;
 
@@ -362,7 +368,15 @@ copyout(pagetable_t pagetable, uint64 psz, uint64 dstva, char *src, uint64 len)
     pte = walk(pagetable, va0, 0);
     // forbid copyout over read-only user text pages.
     if ((*pte & PTE_W) == 0)
-      return -1;
+    {
+      if(*pte & PTE_COW)
+      {
+        if((pa0=vmfault(pagetable,psz,va0,0))==0) return -1;
+        pte = walk(pagetable,va0,0);
+      }
+      if((*pte & PTE_W)==0) return -1;
+    }
+
 
     n = PGSIZE - (dstva - va0);
     if (n > len)
@@ -463,6 +477,32 @@ vmfault(pagetable_t pagetable, uint64 psz, uint64 va, int read)
   if (va >= psz)
     return 0;
   va = PGROUNDDOWN(va);
+  
+  pte_t *pte = walk(pagetable,va,0);
+  if(pte && (*pte & PTE_V) && (*pte & PTE_COW))
+  {
+    uint64 pa = PTE2PA(*pte);
+    uint flags = PTE_FLAGS(*pte);
+
+    //one process only
+    if(krefget((void *)pa)==1)
+    {
+      *pte = PA2PTE(pa) | ((flags & ~PTE_COW) | PTE_W);
+      return pa;
+    }
+
+    char *newpa = kalloc();
+    if(newpa==0) return 0;
+
+    memmove(newpa,(char*)pa,PGSIZE);
+
+    *pte = PA2PTE((uint64)newpa) | ((flags&~PTE_COW) | PTE_W);
+
+    //decrement the current as new allocation is done
+    kfree((void*)pa);
+    return ((uint64)newpa);
+  }
+
   if (ismapped(pagetable, va)) {
     return 0;
   }

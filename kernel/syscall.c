@@ -103,6 +103,8 @@ extern uint64 sys_link(void);
 extern uint64 sys_mkdir(void);
 extern uint64 sys_close(void);
 extern uint64 sys_sync(void);
+extern uint64 sys_sigalarm(void);
+extern uint64 sys_sigreturn(void);
 extern uint64 sys_waitx(void);
 extern uint64 sys_symlink(void);
 
@@ -132,6 +134,8 @@ static uint64 (*syscalls[])(void) = {
   [SYS_mkdir]   = sys_mkdir,
   [SYS_close]   = sys_close,
   [SYS_sync]    = sys_sync,
+  [SYS_sigalarm]  = sys_sigalarm,
+  [SYS_sigreturn] = sys_sigreturn,
   [SYS_waitx]=sys_waitx,
   [SYS_symlink] = sys_symlink,
   // clang-format on

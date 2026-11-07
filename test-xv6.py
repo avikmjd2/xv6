@@ -7,6 +7,8 @@
 # ./test-xv6.py -q usertests (runs the quick tests of usertests)
 # ./test-xv6.py crash  (runs the crash tests)
 # ./test-xv6.py log (runs the log crash test)
+# ./test-xv6.py cowtest (runs the copy-on-write fork tests)
+# ./test-xv6.py alarmtest (runs the alarm tests)
 
 import argparse, os, inspect, re, signal, subprocess, sys, time
 from subprocess import run
@@ -193,6 +195,32 @@ def test_crash():
     test_log()
     test_forphan()
     test_dorphan()
+
+def test_cowtest():
+    print("Test copy-on-write fork")
+    q = QEMU(True)
+    q.cmd("cowtest\n")
+    q.monitor('^ALL COW TESTS PASSED', progress='^(simple|three|file):',
+              timeout=300)
+    q.stop()
+
+def test_alarmtest():
+    print("Test alarms")
+    q = QEMU(True)
+    q.cmd("alarmtest\n")
+    # test3 runs last, so its result means alarmtest is done.
+    q.monitor('^test3 (passed|failed)', progress='^test[0-3] (start|passed)',
+              timeout=300)
+    q.read()
+    lines = q.lines()
+    failed = [n for n in range(4)
+              if not any(re.match('^test%d passed' % n, l) for l in lines)]
+    q.stop()
+    if failed:
+        print("FAIL: " + ", ".join("test%d" % n for n in failed))
+        q.save_output()
+        sys.exit(1)
+    print("OK")
 
 def test_usertests(test=""):
     timeout = 600

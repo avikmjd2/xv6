@@ -21,5 +21,7 @@
 #define SYS_mkdir  20
 #define SYS_close  21
 #define SYS_sync   22
-#define SYS_symlink 23
-#define SYS_waitx  24
+#define SYS_symlink    23
+#define SYS_waitx      24
+#define SYS_sigalarm   25
+#define SYS_sigreturn  26
