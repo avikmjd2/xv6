@@ -103,6 +103,7 @@ void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
+int waitx(uint64, uint64, uint64, uint64);
 
 // swtch.S
 void            swtch(struct context*, struct context*);
@@ -144,6 +145,10 @@ void            trapinit(void);
 void            trapinithart(void);
 extern struct spinlock tickslock;
 void            prepare_return(void);
+int more_priority(int curr);
+void mlfq_boost();
+// extern uint64 my_clock;
+uint64 get_next_clock();
 
 // uart.c
 void            uartinit(void);

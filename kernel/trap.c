@@ -6,6 +6,10 @@
 #include "proc.h"
 #include "defs.h"
 
+#ifdef MLFQ
+static int slice[] = {1,4,8,16};
+#endif
+
 struct spinlock tickslock;
 uint ticks;
 
@@ -81,9 +85,49 @@ usertrap(void)
   if (killed(p))
     kexit(-1);
 
+  if (which_dev == 2 && myproc() != 0 && myproc()->state == RUNNING) 
+  {
+    myproc()->rtime++;
+  }
   // give up the CPU if this is a timer interrupt.
+
+   #ifdef MLFQ
+    if (which_dev == 2 && myproc() != 0 &&myproc()->state==RUNNING)
+    {
+      struct proc* p = myproc();
+      // printk("[PLOT] %d %d %d\n", ticks, myproc()->pid, myproc()->queue);
+      if (ticks % 48 == 0)
+      {
+        yield();
+      }
+      else
+      {
+
+        p->current_ticks++;
+        if(p->current_ticks>=slice[p->queue])
+        {
+          if(p->queue<3) p->queue++;
+          p->current_ticks = 0;
+          // p->enter_tick = ++my_clock;
+          p->enter_tick = get_next_clock();
+          yield();
+        }
+        else
+        {
+          if(more_priority(myproc()->queue))
+          {
+            yield();
+          }
+        }
+      }
+        
+    }
+  #elif defined(FIFO)
+
+  #else
   if (which_dev == 2)
-    yield();
+    yield();  
+  #endif
 
   prepare_return();
 
@@ -154,8 +198,46 @@ kerneltrap()
   }
 
   // give up the CPU if this is a timer interrupt.
+  if (which_dev == 2 && myproc() != 0 && myproc()->state == RUNNING) 
+  {
+    myproc()->rtime++;
+  }
+  #ifdef MLFQ
+  if (which_dev == 2 && myproc() != 0 &&myproc()->state==RUNNING)
+  {
+    struct proc* p = myproc();
+    if (ticks % 48 == 0)
+    {
+      yield();
+    }
+    else
+    {
+      p->current_ticks++;
+      if(p->current_ticks>=slice[p->queue])
+      {
+        if(p->queue<3) p->queue++;
+        p->current_ticks = 0;
+        // p->enter_tick = ++my_clock;
+        p->enter_tick = get_next_clock();
+        yield();
+      }
+      else
+      {
+        if(more_priority(myproc()->queue))
+        {
+          yield();
+        }
+      }
+
+    }
+      
+  }
+  #elif defined(FIFO)
+
+  #else
   if (which_dev == 2 && myproc() != 0)
     yield();
+  #endif
 
   // the yield() may have caused some traps to occur,
   // so restore trap registers for use by kernelvec.S's sepc instruction.
@@ -169,8 +251,16 @@ clockintr()
   if (cpuid() == 0) {
     acquire(&tickslock);
     ticks++;
+    
     wakeup(&ticks);
     release(&tickslock);
+
+    #ifdef MLFQ
+    if(ticks%48==0)
+    {
+      mlfq_boost();
+    }
+    #endif
   }
 
   // ask for the next timer interrupt. this also clears
